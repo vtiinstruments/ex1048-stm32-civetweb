@@ -2912,8 +2912,8 @@ START_TEST(test_handle_form)
 
 	{
 		const char malformed_body[] = "textin=text\0&passwordin=ignored";
-		size_t body_len = sizeof(malformed_body) - 1;
-		int sleep_cnt;
+		size_t malformed_body_len = sizeof(malformed_body) - 1;
+		int malformed_sleep_cnt;
 
 		g_malformed_form_done = 0;
 		g_malformed_form_get_count = 0;
@@ -2928,11 +2928,13 @@ START_TEST(test_handle_form)
 			              "Connection: close\r\n"
 			              "Content-Type: application/x-www-form-urlencoded\r\n"
 			              "Content-Length: %lu\r\n\r\n",
-			              (unsigned long)body_len),
+			              (unsigned long)malformed_body_len),
 			    0);
-			ck_assert_int_eq(mg_write(client_conn, malformed_body, body_len),
-			                 (int)body_len);
-			for (sleep_cnt = 0; sleep_cnt < 10; sleep_cnt++) {
+			ck_assert_int_eq(
+			    mg_write(client_conn, malformed_body, malformed_body_len),
+			    (int)malformed_body_len);
+			for (malformed_sleep_cnt = 0; malformed_sleep_cnt < 10;
+			     malformed_sleep_cnt++) {
 				if (g_malformed_form_done) {
 					break;
 				}
