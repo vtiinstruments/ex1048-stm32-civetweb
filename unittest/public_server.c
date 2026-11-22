@@ -1437,6 +1437,64 @@ START_TEST(test_request_handlers)
 	ck_assert_int_eq(client_ri->status_code, 404);
 	mg_close_connection(client_conn);
 
+#if !defined(NO_FILES)
+	{
+		const size_t query_len = 9000;
+		char response[128];
+		char *query = (char *)malloc(query_len + 1);
+		char *large_request = (char *)malloc(query_len + 256);
+		int request_len;
+		size_t sent_len = 0;
+
+		ck_assert(query != NULL);
+		ck_assert(large_request != NULL);
+		if (query && large_request) {
+			memset(query, 'a', query_len);
+			query[query_len] = '\0';
+			request_len = snprintf(
+			    large_request,
+			    query_len + 256,
+			    "GET /.?q=%s HTTP/1.0\r\n"
+			    "Host: localhost:%u\r\n"
+			    "Connection: close\r\n\r\n",
+			    query,
+			    (unsigned)ipv4_port);
+			ck_assert_int_gt(request_len, (int)query_len);
+
+			if (request_len > (int)query_len) {
+				client_conn = mg_connect_client(
+				    "localhost", ipv4_port, 0, ebuf, sizeof(ebuf));
+				ck_assert(client_conn != NULL);
+				if (client_conn) {
+					while (sent_len < (size_t)request_len) {
+						int written = mg_write(client_conn,
+						                       large_request + sent_len,
+						                       (size_t)request_len - sent_len);
+						ck_assert_int_gt(written, 0);
+						if (written <= 0) {
+							break;
+						}
+						sent_len += (size_t)written;
+					}
+					ck_assert_uint_eq(sent_len, (size_t)request_len);
+					if (sent_len == (size_t)request_len) {
+						int response_len =
+						    mg_read(client_conn, response, sizeof(response) - 1);
+						ck_assert_int_gt(response_len, 0);
+						if (response_len > 0) {
+							response[response_len] = '\0';
+							ck_assert_ptr_ne(strstr(response, " 301 "), NULL);
+						}
+					}
+					mg_close_connection(client_conn);
+				}
+			}
+		}
+		free(large_request);
+		free(query);
+	}
+#endif
+
 	/* Get data from callback */
 	client_conn = mg_download(
 	    "localhost", ipv4_port, 0, ebuf, sizeof(ebuf), "%s", request);
@@ -2694,6 +2752,57 @@ send_chunk_string(struct mg_connection *conn, const char *chunk)
 	mark_point();
 }
 
+static volatile int g_malformed_form_get_count;
+static volatile int g_malformed_form_done;
+
+static int
+malformed_form_field_found(const char *key,
+                           const char *filename,
+                           char *path,
+                           size_t pathlen,
+                           void *user_data)
+{
+	(void)key;
+	(void)filename;
+	(void)path;
+	(void)pathlen;
+	(void)user_data;
+	return MG_FORM_FIELD_STORAGE_GET;
+}
+
+static int
+malformed_form_field_get(const char *key,
+                         const char *value,
+                         size_t value_len,
+                         void *user_data)
+{
+	(void)key;
+	(void)value;
+	(void)value_len;
+	(void)user_data;
+	++g_malformed_form_get_count;
+	return 0;
+}
+
+static int
+MalformedFormGet(struct mg_connection *conn, void *cbdata)
+{
+	struct mg_form_data_handler fdh = {malformed_form_field_found,
+	                                   malformed_form_field_get,
+	                                   NULL,
+	                                   NULL};
+	(void)cbdata;
+
+	fdh.user_data = NULL;
+	(void)mg_handle_form_request(conn, &fdh);
+	g_malformed_form_done = 1;
+	mg_printf(conn,
+	          "HTTP/1.1 200 OK\r\n"
+	          "Content-Length: 0\r\n"
+	          "Connection: close\r\n\r\n");
+	return 1;
+}
+
 
 START_TEST(test_handle_form)
 {
@@ -2729,6 +2838,10 @@ START_TEST(test_handle_form)
 	mg_set_request_handler(ctx, "/handle_form", FormGet, NULL);
 	mg_set_request_handler(ctx, "/handle_form_store", FormStore1, NULL);
 	mg_set_request_handler(ctx, "/handle_form_store2", FormStore2, NULL);
+	mg_set_request_handler(ctx,
+	                       "/handle_malformed_form",
+	                       MalformedFormGet,
+	                       NULL);
 
 	test_sleep(1);
 
@@ -2796,6 +2909,40 @@ START_TEST(test_handle_form)
 	ck_assert(client_ri != NULL);
 	ck_assert_int_eq(client_ri->status_code, 200);
 	mg_close_connection(client_conn);
+
+	{
+		const char malformed_body[] = "textin=text\0&passwordin=ignored";
+		size_t body_len = sizeof(malformed_body) - 1;
+		int sleep_cnt;
+
+		g_malformed_form_done = 0;
+		g_malformed_form_get_count = 0;
+		client_conn =
+		    mg_connect_client("localhost", 8884, 0, ebuf, sizeof(ebuf));
+		ck_assert(client_conn != NULL);
+		if (client_conn) {
+			ck_assert_int_gt(
+			    mg_printf(client_conn,
+			              "POST /handle_malformed_form HTTP/1.1\r\n"
+			              "Host: localhost:8884\r\n"
+			              "Connection: close\r\n"
+			              "Content-Type: application/x-www-form-urlencoded\r\n"
+			              "Content-Length: %lu\r\n\r\n",
+			              (unsigned long)body_len),
+			    0);
+			ck_assert_int_eq(mg_write(client_conn, malformed_body, body_len),
+			                 (int)body_len);
+			for (sleep_cnt = 0; sleep_cnt < 10; sleep_cnt++) {
+				if (g_malformed_form_done) {
+					break;
+				}
+				test_sleep(1);
+			}
+			mg_close_connection(client_conn);
+		}
+		ck_assert(g_malformed_form_done);
+		ck_assert_int_eq(g_malformed_form_get_count, 0);
+	}
 
 	/* Handle form: "POST multipart/form-data" */
 	multipart_body =

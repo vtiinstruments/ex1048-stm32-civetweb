@@ -529,6 +529,19 @@ START_TEST(test_mg_url_decode)
 	ret = mg_url_decode("%20%21", 6, buf, sizeof(buf), 0);
 	ck_assert_int_eq(ret, 2);
 	ck_assert_str_eq(buf, " !");
+
+	ret = mg_url_decode("x y", 3, buf, sizeof(buf), 1);
+	ck_assert_int_eq(ret, -1);
+	{
+		const char invalid_form_data[] = {'x', '\0', 'y'};
+		ret = mg_url_decode(
+		    invalid_form_data,
+		    (int)sizeof(invalid_form_data),
+		    buf,
+		    (int)sizeof(buf),
+		    1);
+		ck_assert_int_eq(ret, -1);
+	}
 }
 END_TEST
 
