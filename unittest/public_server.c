@@ -38,7 +38,10 @@
 #include <civetweb.h>
 
 #if defined(_WIN32)
+#include <direct.h>
 #include <windows.h>
+#define test_mkdir(path) _mkdir(path)
+#define test_rmdir(path) _rmdir(path)
 #define test_sleep(x) (Sleep((x)*1000))
 #else
 #include <arpa/inet.h>
@@ -46,6 +49,8 @@
 #include <netinet/in.h>
 #include <sys/socket.h>
 #include <unistd.h>
+#define test_mkdir(path) mkdir(path, 0700)
+#define test_rmdir(path) rmdir(path)
 #define test_sleep(x) (sleep(x))
 #endif
 
@@ -1440,55 +1445,50 @@ START_TEST(test_request_handlers)
 #if !defined(NO_FILES)
 	{
 		const size_t query_len = 9000;
-		char response[128];
+		const char *redirect_test_dir = "civetweb_redirect_test";
 		char *query = (char *)malloc(query_len + 1);
 		char *large_request = (char *)malloc(query_len + 256);
+		int redirect_status = 0;
+		int mkdir_result;
 		int request_len;
-		size_t sent_len = 0;
 
 		ck_assert(query != NULL);
 		ck_assert(large_request != NULL);
 		if (query && large_request) {
+			mkdir_result = test_mkdir(redirect_test_dir);
+			ck_assert_int_eq(mkdir_result, 0);
 			memset(query, 'a', query_len);
 			query[query_len] = '\0';
 			request_len = snprintf(
 			    large_request,
 			    query_len + 256,
-			    "GET /.?q=%s HTTP/1.0\r\n"
+			    "GET /%s?q=%s HTTP/1.0\r\n"
 			    "Host: localhost:%u\r\n"
 			    "Connection: close\r\n\r\n",
+			    redirect_test_dir,
 			    query,
 			    (unsigned)ipv4_port);
 			ck_assert_int_gt(request_len, (int)query_len);
 
 			if (request_len > (int)query_len) {
-				client_conn = mg_connect_client(
-				    "localhost", ipv4_port, 0, ebuf, sizeof(ebuf));
-				ck_assert(client_conn != NULL);
+				client_conn = mg_download("localhost",
+				                          ipv4_port,
+				                          0,
+				                          ebuf,
+				                          sizeof(ebuf),
+				                          "%s",
+				                          large_request);
 				if (client_conn) {
-					while (sent_len < (size_t)request_len) {
-						int written = mg_write(client_conn,
-						                       large_request + sent_len,
-						                       (size_t)request_len - sent_len);
-						ck_assert_int_gt(written, 0);
-						if (written <= 0) {
-							break;
-						}
-						sent_len += (size_t)written;
-					}
-					ck_assert_uint_eq(sent_len, (size_t)request_len);
-					if (sent_len == (size_t)request_len) {
-						int response_len =
-						    mg_read(client_conn, response, sizeof(response) - 1);
-						ck_assert_int_gt(response_len, 0);
-						if (response_len > 0) {
-							response[response_len] = '\0';
-							ck_assert_ptr_ne(strstr(response, " 301 "), NULL);
-						}
+					client_ri = mg_get_response_info(client_conn);
+					if (client_ri) {
+						redirect_status = client_ri->status_code;
 					}
 					mg_close_connection(client_conn);
 				}
 			}
+			(void)test_rmdir(redirect_test_dir);
+			ck_assert(client_conn != NULL);
+			ck_assert_int_eq(redirect_status, 301);
 		}
 		free(large_request);
 		free(query);
